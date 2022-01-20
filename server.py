@@ -1,106 +1,99 @@
 import socket
+import os
 import threading
-import http.server
+from socket import AF_INET, socket, SOCK_STREAM
+from threading import Thread
+from flask import Flask, request
 
-clients = []
-nicknames = []
-clients_udp = []
-udp_socket = None
-
-
-def broadcast(message, udp_socket=None):
-    for client in clients:
-        client.send(message)
-    if udp_socket:
-        for udp_client in clients_udp:
-            udp_socket.sendto(bytes(message, encoding='utf8'), (udp_client))
+clients = {}
+addresses = {}
 
 
-def handle(client):
+def broadcast(msg, prefix=""):
+    for sock in clients:
+        sock.send(bytes(prefix, "utf8") + msg)
+
+
+def handle_client(client):
+    name = client.recv(1024).decode("utf8")
+    welcome = 'Welcome %s! If you ever want to quit, type {quit} to exit.' % name
+    client.send(bytes(welcome, "utf8"))
+    msg = "%s has joined the chat!" % name
+    broadcast(bytes(msg, "utf8"))
+    clients[client] = name
+
     while True:
-        try:
-            message = client.recv(1024)
-            broadcast(message)
-        except:
-            index = client.index(client)
-            clients.remove(client)
+        msg = client.recv(1024)
+        if msg != bytes("{quit}", "utf8"):
+            broadcast(msg, name + ": ")
+        else:
+            client.send(bytes("{quit}", "utf8"))
             client.close()
-            nickname = nicknames[index]
-            broadcast(f"{nickname} left the chat..".encode('ascii'))
-            nicknames.remove(nickname)
+            del clients[client]
+            broadcast(bytes("%s has left the chat." % name, "utf8"))
             break
 
 
-def handle_udp(address_udp, udp_socket):
+def accept_incoming_connections():
+    # Sets up handling for incoming clients.
     while True:
-        try:
-            message = udp_socket.recvfrom(1024)
-            broadcast(message, udp_socket)
-        except:
-            index = clients_udp.index(address_udp[0])
-            nickname = nicknames[index]
-            clients_udp.remove(address_udp)
-            broadcast(f"{nickname} left the chat..".encode('ascii'), udp_socket)
-            nicknames.remove(nickname)
-            break
+        client, client_address = server.accept()
+        print("%s:%s has connected." % client_address)
+        client.send(bytes("Greetings from the chat app! Now type your name and press enter!", "utf8"))
+        addresses[client] = client_address
+        Thread(target=handle_client, args=(client,)).start()
 
 
-def server_tcp_start(HOST, TCP_PORT):
-    tcp_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    tcp_socket.bind((HOST, TCP_PORT))
-    tcp_socket.listen(10)
-    client, address = tcp_socket.accept()
-    print(f"Connection established with TCP- {client}:{address}")
-    print(f"connected with {str(address)} ")
-    client.send('NICK'.encode('ascii'))
-    nickname = client.recv(1024).decode('ascii')
-    nicknames.append(nickname)
-    clients.append(client)
-    print(f'Nickname is {nickname}')
-    broadcast(f'{nickname} joined the chat'.encode('ascii'))
-    client.send('Connected to the server'.encode('ascii'))
-    thread = threading.Thread(target=handle, args=(client,))
-    thread.start()
+def http_server():
+    app.run(host=host, port=HTTP_port)
 
 
-def server_udp_start(HOST, UDP_PORT):
-    global udp_socket
-    udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    udp_socket.bind((HOST, UDP_PORT))
-    print("UDP server up and listening")
-    nickname, address_udp = udp_socket.recvfrom(1024)
-    print(address_udp)
-    print("\n" + nickname.decode("utf-8"))
-    nicknames.append(nickname.decode("utf-8"))
-    clients_udp.append(address_udp[0])
-    print(f'Nickname is {nickname.decode("utf-8")}')
-    print(type(nickname))
-    print(type(address_udp))
-    broadcast(f'{nickname.decode("utf-8")} joined the chat', udp_socket)
-    udp_socket.sendto(bytes(nickname.decode("utf-8"), encoding='utf8'), (HOST, UDP_PORT))
-    thread = threading.Thread(target=handle_udp, args=(address_udp))
-    thread.start()
+app = Flask(__name__)
+
+
+@app.route('/', methods=['POST'])
+def result():
+    app_root = os.path.dirname(os.path.abspath(__file__))
+    target = os.path.join(app_root, 'static/files/')
+    if not os.path.isdir(target):
+        os.makedirs(target)
+    print(request.files['file'])
+    file = request.files['file']
+    file_name = file.filename or ''
+    destination = '/'.join([target, file_name])
+    file.save(destination)
+    f = open(destination, 'rb')
+    l = f.read(1024)
+    msg = "/send file:" + file_name
+    broadcast(bytes(msg, "utf8"))
+    while (l):
+        for client in clients:
+            name = clients[client]
+            broadcast(l, name + ": ")
+            print('Sent ', repr(l))
+            l = f.read(1024)
+    f.close()
+
+    print('Done sending')
+    return 'Received !'  # response to your request.
 
 
 if __name__ == "__main__":
-    HOST = "127.0.0.1"
-    TCP_PORT = 8000
-    UDP_PORT = 8001
-    HTTP_PORT = 8002
+    host = "127.0.0.1"
+    TCP_port = 8000
+    HTTP_port = 8004
     # tcp
-    #  tcp_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    #  tcp_socket.bind((HOST, TCP_PORT))
+    server = socket(AF_INET, SOCK_STREAM)
+
     # udp
-    #  udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    #  udp_socket.bind((HOST, UDP_PORT))
-    # http
-    # http_server = http.server.HTTPServer((HOST, HTTP_PORT), HttpHandler)
+    # server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
-    print("Start server")
-    tcp_tread = threading.Thread(target=server_tcp_start, args=(HOST, TCP_PORT))
-    udp_thread = threading.Thread(target=server_udp_start, args=(HOST, UDP_PORT))
-    #  http_thread = threading.Thread(target=server_http_start, args=(http_server))
-
-    tcp_tread.start()
-    udp_thread.start()
-#  http_thread.start()
+    server.bind((host, TCP_port))
+    server.listen(5)
+    print("Waiting for connection...")
+    ACCEPT_THREAD = Thread(target=accept_incoming_connections)
+    http_thread = Thread(target=http_server)
+    ACCEPT_THREAD.start()
+    http_thread.start()
+    ACCEPT_THREAD.join()
+    server.close()
